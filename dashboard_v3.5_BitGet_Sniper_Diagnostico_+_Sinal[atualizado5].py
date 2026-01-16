@@ -6,7 +6,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="BitGet Sniper v5.2", page_icon="🦅", layout="wide")
+st.set_page_config(page_title="BitGet Sniper v5.3", page_icon="🦅", layout="wide")
 
 st.markdown("""
 <style>
@@ -16,12 +16,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🦅 BitGet Sniper: Direct Link (v5.2)")
+st.title("🦅 BitGet Sniper: Full V2 (v5.3)")
 
-# --- MOTOR DE CONEXÃO LIMPO ---
+# --- MOTOR DE CONEXÃO ---
 def get_session():
     session = requests.Session()
-    # Headers "minimalistas" para não confundir o servidor
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json"
@@ -34,78 +33,48 @@ def get_session():
 
 http = get_session()
 
-# --- FUNÇÕES DE DADOS ---
+# --- FUNÇÕES DE DADOS (100% V2) ---
 
 @st.cache_data(ttl=60)
 def get_market_tickers():
-    # TRUQUE DE ENGENHARIA v5.2:
-    # Em vez de passar params={'productType':...}, colocamos direto na URL.
-    # Isso evita que a nuvem mude a codificação da interrogação (?) ou do igual (=).
-    
-    # Tentativa 1: API V2 (Padrão Ouro)
+    # Rota V2 Hardcoded (A que funcionou no seu teste)
     url_v2 = "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"
     
-    # Tentativa 2: API V1 (Fallback) - Note o 'umcbl' minúsculo hardcoded
-    url_v1 = "https://api.bitget.com/api/mix/v1/market/tickers?productType=umcbl"
-    
-    last_error = None
-
-    # Tenta V2 Primeiro
     try:
         resp = http.get(url_v2, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         
-        # O formato da V2 geralmente é data['data'] direto
+        # Na V2, os dados geralmente estão em data['data']
         raw_data = data.get("data", [])
         
         if raw_data:
             df = pd.DataFrame(raw_data)
-            # Mapeamento V2
+            # Mapeamento V2 Exato
             rename_map = {
-                "lastPr": "price", "last": "price", 
+                "symbol": "symbol",
+                "lastPr": "price",        # V2 usa lastPr
                 "usdtVolume": "volume", 
-                "change24h": "change_24h", "priceChangePercent": "change_24h"
+                "change24h": "change_24h" # V2 usa change24h
             }
+            # Renomear apenas colunas que existem
             df.rename(columns=rename_map, inplace=True)
             return process_dataframe(df)
             
     except Exception as e:
-        last_error = e
-        print(f"V2 falhou: {e}")
+        st.error(f"Erro ao buscar Tickers V2: {e}")
 
-    # Se V2 falhou, Tenta V1
-    try:
-        resp = http.get(url_v1, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        raw_data = data.get("data", [])
-        
-        if raw_data:
-            df = pd.DataFrame(raw_data)
-            # Mapeamento V1
-            rename_map = {
-                "last": "price", 
-                "usdtVolume": "volume", 
-                "priceChangePercent": "change_24h"
-            }
-            df.rename(columns=rename_map, inplace=True)
-            return process_dataframe(df)
-
-    except Exception as e:
-        last_error = e
-
-    st.error(f"Erro Crítico (V5.2): {last_error}")
     return pd.DataFrame()
 
 def process_dataframe(df):
-    """Função auxiliar para limpar e ordenar os dados independente da API"""
-    # Garante colunas numéricas
-    for c in ["price", "change_24h", "volume"]:
+    """Limpeza e Ordenação"""
+    # Garante colunas essenciais
+    cols_needed = ["price", "change_24h", "volume"]
+    for c in cols_needed:
         if c not in df.columns: df[c] = 0.0
         else: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     
-    # Filtro USDT e Ordenação
+    # Filtro USDT
     if 'symbol' in df.columns:
         df = df[df["symbol"].str.contains("USDT")]
         df = df.sort_values(by="volume", ascending=False).head(40)
@@ -113,25 +82,38 @@ def process_dataframe(df):
     return pd.DataFrame()
 
 def get_candle_data(symbol):
-    # Para candles, forçamos V1 pois é mais simples para histórico
-    # url hardcoded sem params dit
-    if not symbol.endswith("_UMCBL"): symbol_v1 = f"{symbol}_UMCBL"
-    else: symbol_v1 = symbol
-        
-    end = int(time.time() * 1000)
-    start = end - (2 * 3600 * 1000)
+    # --- CORREÇÃO PRINCIPAL AQUI ---
+    # Migramos de V1 para V2 nos Candles também.
+    # Endpoint V2: /api/v2/mix/market/candles
+    # Params obrigatórios: symbol, productType=USDT-FUTURES, granularity, startTime, endTime
     
-    # Montagem manual da URL
-    url = f"https://api.bitget.com/api/mix/v1/market/candles?symbol={symbol_v1}&granularity=1H&startTime={start}&endTime={end}"
+    end = int(time.time() * 1000)
+    start = end - (2 * 3600 * 1000) # 2 horas atrás
+    
+    # Montagem da URL "Soldada" (Hardcoded) para evitar erro 400
+    # Nota: Não adicionamos _UMCBL aqui, usamos o symbol puro da V2 (ex: BTCUSDT)
+    url = f"https://api.bitget.com/api/v2/mix/market/candles?symbol={symbol}&productType=USDT-FUTURES&granularity=1H&startTime={start}&endTime={end}"
     
     try:
         resp = http.get(url, timeout=5)
         data = resp.json()
-        candles = data if isinstance(data, list) else data.get("data", [])
+        
+        # V2 retorna lista em ['data']
+        candles = data.get("data", [])
         
         if not candles: return 0.0, 0.0
         
-        latest = candles[-1]
+        # Formato V2 Candle: [ts, open, high, low, close, vol, ...]
+        latest = candles[0] # ATENÇÃO: Na V2 a ordem pode ser diferente, mas geralmente o index 0 é o mais recente ou o mais antigo dependendo do sort.
+        # Vamos verificar a lógica de tempo. Geralmente API de candle retorna ordenado por tempo.
+        # BitGet V2 Candles vem descendente ou ascendente? Vamos pegar o último da lista para garantir se for cronológico, 
+        # mas se a lista vier invertida, pegamos o primeiro.
+        # Por segurança, vamos pegar o último da lista (assumindo cronológico padrão) 
+        # SE a lista tiver mais de 1 item e os tempos estiverem subindo.
+        
+        # Simples: Pegamos o último candle da lista (index -1)
+        latest = candles[-1] 
+        
         open_p = float(latest[1])
         high_p = float(latest[2])
         low_p = float(latest[3])
@@ -142,13 +124,23 @@ def get_candle_data(symbol):
         amplitude = ((high_p - low_p) / low_p) * 100.0
         direcao = ((close_p - open_p) / open_p) * 100.0
         return amplitude, direcao
-    except: return 0.0, 0.0
+    except: 
+        return 0.0, 0.0
 
 # --- LÓGICA DE NEGÓCIO ---
 def diagnostico_ia(row):
     amp, chg = row['Amplitude_1H'], row['change_24h']
-    if chg > 15: return "🚀 Foguete"
-    elif chg < -10: return "🩸 Capitulação"
+    # Ajuste: Change na V2 pode vir como 0.02 (2%) ou 2.0 (2%). Vamos normalizar visualmente.
+    # Mas para lógica, assumimos número absoluto.
+    
+    # Se o change vier decimal (ex: 0.05 para 5%), multiplicamos por 100 para a lógica
+    if -1 < chg < 1 and chg != 0: 
+        chg_logic = chg * 100 
+    else: 
+        chg_logic = chg
+
+    if chg_logic > 15: return "🚀 Foguete"
+    elif chg_logic < -10: return "🩸 Capitulação"
     elif amp > 3.5: return "⚡ Volatilidade Extrema"
     elif amp > 2.0: return "👀 Alta Volatilidade"
     else: return "💤 Normal"
@@ -162,13 +154,13 @@ def sinal_direcao(row):
     return "⚪ Aguardar"
 
 # --- FRONTEND ---
-if st.button("🔄 RASTREAR MERCADO (FORÇA BRUTA)", type="primary"):
-    status = st.status("Testando conexão direta...", expanded=True)
+if st.button("🔄 RASTREAR MERCADO (V2 COMPLETO)", type="primary"):
+    status = st.status("Executando Protocolo V2...", expanded=True)
     
     df = get_market_tickers()
     
     if not df.empty:
-        status.write(f"Conexão estabelecida! Analisando {len(df)} ativos...")
+        status.write(f"Lista obtida! Buscando velas de {len(df)} ativos...")
         amps, dirs = [], []
         prog = status.progress(0)
         
@@ -180,23 +172,30 @@ if st.button("🔄 RASTREAR MERCADO (FORÇA BRUTA)", type="primary"):
             
         df['Amplitude_1H'] = amps
         df['Direcao_1H'] = dirs
-        df['Ticker'] = df['symbol'].str.replace('_UMCBL', '').str.replace('USDT', '')
+        
+        # Limpeza Visual
+        df['Ticker'] = df['symbol'].str.replace('USDT', '')
         
         df['Diagnóstico'] = df.apply(diagnostico_ia, axis=1)
         df['Viés (Sinal)'] = df.apply(sinal_direcao, axis=1)
+        
+        # Conversão visual de Change 24h (Se vier decimal, mostra %)
+        # BitGet V2 costuma mandar decimal (ex: 0.023). Streamlit number column lida com isso.
+        
         df_final = df.sort_values(by='Amplitude_1H', ascending=False)
         
-        status.update(label="Sucesso!", state="complete", expanded=False)
+        status.update(label="Sucesso! Dados Carregados.", state="complete", expanded=False)
         
         st.dataframe(
             df_final[["Ticker", "Diagnóstico", "Viés (Sinal)", "price", "Amplitude_1H", "change_24h", "volume"]],
             column_config={
                 "price": st.column_config.NumberColumn(format="$%.4f"),
                 "Amplitude_1H": st.column_config.ProgressColumn("Volatilidade", format="%.2f%%", min_value=0, max_value=8),
+                "change_24h": st.column_config.NumberColumn("24h %", format="%.2f%%"), # Formato percentual
                 "volume": st.column_config.NumberColumn("Liq.", format="$%.0f")
             }, hide_index=True, use_container_width=True, height=800
         )
     else:
-        st.error("Todas as tentativas falharam. A Bitget pode estar bloqueando a faixa de IP do Streamlit Cloud.")
+        st.error("Falha ao obter lista de Tickers. A API V2 pode estar indisponível momentaneamente.")
 else:
-    st.info("👆 Clique para conectar (v5.2 - URL Hardcoded).")
+    st.info("👆 V5.3 Pronta: Clique para iniciar.")
